@@ -37,6 +37,25 @@ npm run build  # only mechanical correctness check — there is no lint or test 
 
 The Next dev server is usually already running. Logs at `/tmp/kam-dev.log`.
 
+## Commit messages
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) format:
+
+- `feat:` — new visible behavior (new tile type, new admin field, new chrome element)
+- `feat(<scope>):` — scoped feature, e.g. `feat(admin):`, `feat(canvas):`
+- `fix:` — bug fix
+- `style:` — pure CSS / typography / spacing / colour
+- `refactor:` — code reshape, no behavior change
+- `chore:` — config / deps / repo housekeeping
+- `docs:` — CLAUDE.md or README updates
+- `perf:` — performance change
+
+Use scopes (`feat(admin):`, `style(intro-card):`) when the change is localised
+to one surface — admin, canvas, intro-card, song-tile, voice-note, browser-bar.
+
+Initial two commits don't follow the convention (legacy). Everything from
+8366d67 onward should.
+
 ## Design system — strict rules
 
 ### Geometry
