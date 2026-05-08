@@ -21,8 +21,21 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://kamsbirthday.vercel.app"),
   title: "kamsbirthday.co — a corner of the internet for kam",
   description: "A little 2D desktop of memories from the people who love Kam.",
+  openGraph: {
+    title: "Happy birthday, Kam.",
+    description: "A little corner of the internet, made of memories from the people who love you.",
+    siteName: "kamsbirthday.co",
+    locale: "en_GB",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Happy birthday, Kam.",
+    description: "A little corner of the internet, made of memories from the people who love you.",
+  },
 };
 
 export default function RootLayout({
