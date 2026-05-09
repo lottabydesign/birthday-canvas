@@ -16,6 +16,19 @@
   --canvas: #2D2DFF;
 }
 
+/* Hide the intro overlay during initial paint for return visitors.
+   The inline script in layout.tsx sets [data-intro-skip] on <html> before
+   first paint when localStorage says the user has already seen the intro
+   and there's no ?intro override. React still mounts the Intro component
+   normally and unmounts itself via useEffect — this rule just keeps it
+   visually invisible during the hydration window so there's no dark flash.
+
+   `display: none` (not opacity) so the overlay doesn't even reserve space
+   or block clicks during the skip-flicker window. */
+[data-intro-skip] [data-intro-overlay] {
+  display: none !important;
+}
+
 /* Shimmer — a slow bright sweep across white text on dark chrome.
    Used on the hint pill ("scroll or drag to explore") to gently draw
    the eye toward the interaction affordance without animating motion. */

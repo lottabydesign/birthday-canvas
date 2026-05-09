@@ -38,6 +38,18 @@ export const metadata: Metadata = {
   },
 };
 
+// Inline script that runs synchronously during HTML parse, BEFORE the browser
+// paints anything. It checks localStorage + URL for "have they seen the intro?"
+// and stamps <html data-intro-skip="1"> if so. A CSS rule uses that attribute
+// to hide the dark intro overlay before first paint — eliminating the brief
+// dark flash return visitors used to see between paint and React hydration.
+// Same pattern dark-mode-toggle sites use to avoid theme flicker.
+//
+// Content is a hardcoded string literal (no user input), so the React inline-
+// script API used below is XSS-safe in this usage.
+const INTRO_SKIP_SCRIPT =
+  "try{var u=new URL(location.href);if(!u.searchParams.has('intro')&&localStorage.getItem('kams-intro-shown')==='1'){document.documentElement.dataset.introSkip='1';}}catch(e){}";
+
 export default function RootLayout({
   children,
 }: {
@@ -45,6 +57,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={`${geist.variable} ${geistMono.variable} ${jetbrains.variable}`}>
+      <head>
+        {/* eslint-disable-next-line react/no-danger */}
+        <script
+          // The string is a static literal defined above; no user input flows in.
+          dangerouslySetInnerHTML={{ __html: INTRO_SKIP_SCRIPT }}
+        />
+      </head>
       <body>{children}</body>
     </html>
   );
