@@ -1,22 +1,73 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import type { Tile } from "@/app/data/tiles";
 
-// Fields that are commonly edited via this admin.
-// Add more here if you want to expose them.
-const EDITABLE_FIELDS: Array<{
+// Text fields shown in the top half of each editor row.
+const TEXT_FIELDS: Array<{
   key: keyof Tile;
   label: string;
-  appliesTo?: Tile["type"][]; // limit to certain tile types
+  appliesTo?: Tile["type"][];
   placeholder?: string;
+  // Render as <textarea> instead of <input>. Can be a fixed bool or a
+  // predicate that decides per-tile (e.g. `note` is multi-line for Text
+  // tiles but a single-line duration for Voice Notes).
+  multiline?: boolean | ((tile: Tile) => boolean);
 }> = [
   { key: "filename", label: "Filename (chrome bar)" },
   { key: "noteFrom", label: "Note from", appliesTo: ["Text", "Voice Note"] },
-  { key: "note", label: "Body / duration", appliesTo: ["Text", "Voice Note"] },
+  {
+    key: "note",
+    label: "Body / duration",
+    appliesTo: ["Text", "Voice Note"],
+    multiline: (tile) => tile.type === "Text",
+  },
   { key: "songTitle", label: "Song title", appliesTo: ["Song"] },
   { key: "songArtist", label: "Song artist", appliesTo: ["Song"] },
 ];
+
+// Media fields — rendered as picker buttons that open a file-grid modal.
+type MediaKind = "image" | "audio" | "video";
+
+const MEDIA_FIELDS: Array<{
+  key: keyof Tile;
+  label: string;
+  appliesTo: Tile["type"][];
+  kind: (tile: Tile) => MediaKind;
+}> = [
+  {
+    key: "src",
+    label: "Source",
+    appliesTo: ["Photo", "Video"],
+    kind: (t) => (t.type === "Photo" ? "image" : "video"),
+  },
+  {
+    key: "audioSrc",
+    label: "Audio",
+    appliesTo: ["Voice Note", "Song"],
+    kind: () => "audio",
+  },
+  {
+    key: "songCoverSrc",
+    label: "Cover image",
+    appliesTo: ["Song"],
+    kind: () => "image",
+  },
+  {
+    key: "noteImageSrc",
+    label: "Image (replaces text)",
+    appliesTo: ["Text"],
+    kind: () => "image",
+  },
+];
+
+type MediaFile = {
+  name: string;
+  url: string;
+  kind: "image" | "audio" | "video" | "other";
+  size: number;
+  mtimeMs: number;
+};
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -118,6 +169,221 @@ export default function AdminPage() {
           />
         ))}
       </main>
+    </div>
+  );
+}
+
+function MediaPicker({
+  label,
+  value,
+  kind,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  kind: MediaKind;
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [files, setFiles] = useState<MediaFile[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Lazy-load the media list the first time the picker opens.
+  useEffect(() => {
+    if (!open || files !== null) return;
+    fetch("/api/admin/media")
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return (await r.json()) as MediaFile[];
+      })
+      .then(setFiles)
+      .catch((e) => setLoadError(String(e)));
+  }, [open, files]);
+
+  // ESC to close
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const filtered = (files ?? []).filter((f) => f.kind === kind);
+  const fileName = value ? value.split("/").pop() : "";
+
+  return (
+    <>
+      <div className="flex items-center gap-3 p-2 rounded-md border border-zinc-200 bg-zinc-50">
+        <MediaThumb url={value} kind={kind} />
+        <div className="flex-1 min-w-0">
+          <div className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">
+            {label}
+          </div>
+          <div className="text-xs text-zinc-700 font-mono truncate">
+            {fileName || <span className="text-zinc-400">(none)</span>}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="px-2.5 py-1 rounded-md border border-zinc-300 bg-white text-xs hover:bg-zinc-100"
+        >
+          {value ? "Change…" : "Pick…"}
+        </button>
+        {value && (
+          <button
+            type="button"
+            onClick={() => onChange("")}
+            className="text-xs text-zinc-400 hover:text-zinc-700"
+            title="Clear"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-6"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-4xl w-full max-h-[85vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-200">
+              <div>
+                <div className="font-semibold text-sm">Pick a {kind}</div>
+                <div className="text-xs text-zinc-500 mt-0.5">
+                  {filtered.length} file{filtered.length === 1 ? "" : "s"} in{" "}
+                  <code>public/media/</code>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="text-zinc-500 hover:text-zinc-900 text-xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto p-5">
+              {loadError && (
+                <div className="text-sm text-red-600">
+                  Couldn’t load media: {loadError}
+                </div>
+              )}
+              {!files && !loadError && (
+                <div className="text-sm text-zinc-500">Loading…</div>
+              )}
+              {files && filtered.length === 0 && (
+                <div className="text-sm text-zinc-500">
+                  No {kind} files found in <code>public/media/</code>. Drop one
+                  in the folder, then refresh.
+                </div>
+              )}
+              {filtered.length > 0 && (
+                <div
+                  className={
+                    kind === "image" || kind === "video"
+                      ? "grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-3"
+                      : "flex flex-col gap-2"
+                  }
+                >
+                  {filtered.map((f) => {
+                    const selected = f.url === value;
+                    return (
+                      <button
+                        key={f.url}
+                        type="button"
+                        onClick={() => {
+                          onChange(f.url);
+                          setOpen(false);
+                        }}
+                        className={
+                          "text-left group rounded-md overflow-hidden border-2 " +
+                          (selected
+                            ? "border-zinc-900"
+                            : "border-zinc-200 hover:border-zinc-400")
+                        }
+                      >
+                        <MediaThumb url={f.url} kind={kind} large />
+                        <div className="px-2 py-1.5 bg-white">
+                          <div className="text-[11px] font-mono text-zinc-700 truncate">
+                            {f.name}
+                          </div>
+                          <div className="text-[10px] text-zinc-400">
+                            {Math.round(f.size / 1024)} KB
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function MediaThumb({
+  url,
+  kind,
+  large = false,
+}: {
+  url: string;
+  kind: MediaKind;
+  large?: boolean;
+}) {
+  const sizing = large
+    ? "aspect-square w-full bg-zinc-100"
+    : "w-12 h-12 shrink-0 rounded bg-zinc-100";
+
+  if (!url) {
+    return (
+      <div className={sizing + " grid place-items-center text-zinc-400 text-xs"}>
+        —
+      </div>
+    );
+  }
+
+  if (kind === "image") {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={url}
+        alt=""
+        className={sizing + " object-cover"}
+        loading="lazy"
+      />
+    );
+  }
+  if (kind === "video") {
+    return (
+      <video
+        src={url}
+        className={sizing + " object-cover"}
+        muted
+        playsInline
+        preload="metadata"
+      />
+    );
+  }
+  // audio
+  return (
+    <div
+      className={
+        sizing +
+        " grid place-items-center bg-zinc-900 text-white text-lg rounded"
+      }
+    >
+      ♪
     </div>
   );
 }
@@ -225,8 +491,11 @@ function TileEditor({
   const [state, setState] = useState<SaveState>("idle");
   const [errMsg, setErrMsg] = useState<string | null>(null);
 
-  const fields = EDITABLE_FIELDS.filter(
+  const textFields = TEXT_FIELDS.filter(
     (f) => !f.appliesTo || f.appliesTo.includes(tile.type)
+  );
+  const mediaFields = MEDIA_FIELDS.filter((f) =>
+    f.appliesTo.includes(tile.type)
   );
 
   const dirty = Object.keys(draft).some(
@@ -249,26 +518,66 @@ function TileEditor({
         </div>
 
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {fields.map(({ key, label, placeholder }) => {
+        {textFields.map(({ key, label, placeholder, multiline }) => {
           const currentValue = (draft[key] ?? tile[key] ?? "") as string;
+          const isMultiline =
+            typeof multiline === "function" ? multiline(tile) : !!multiline;
+          const inputClassName =
+            "mt-1 w-full px-3 py-2 rounded-md border border-zinc-200 bg-zinc-50 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:bg-white";
           return (
-            <label key={String(key)} className="block">
+            <label
+              key={String(key)}
+              className={"block" + (isMultiline ? " sm:col-span-2" : "")}
+            >
               <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wider">
                 {label}
               </span>
-              <input
-                type="text"
-                value={currentValue}
-                placeholder={placeholder}
-                onChange={(e) =>
-                  setDraft((d) => ({ ...d, [key]: e.target.value }))
-                }
-                className="mt-1 w-full px-3 py-2 rounded-md border border-zinc-200 bg-zinc-50 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:bg-white"
-              />
+              {isMultiline ? (
+                <textarea
+                  value={currentValue}
+                  placeholder={placeholder}
+                  rows={5}
+                  onChange={(e) =>
+                    setDraft((d) => ({ ...d, [key]: e.target.value }))
+                  }
+                  // `field-sizing: content` lets the textarea auto-grow
+                  // with its content (Chrome 123+, Safari 17.4+). Falls
+                  // back gracefully to the rows={5} minimum elsewhere.
+                  style={{ fieldSizing: "content" } as CSSProperties}
+                  className={inputClassName + " resize-y leading-relaxed"}
+                />
+              ) : (
+                <input
+                  type="text"
+                  value={currentValue}
+                  placeholder={placeholder}
+                  onChange={(e) =>
+                    setDraft((d) => ({ ...d, [key]: e.target.value }))
+                  }
+                  className={inputClassName}
+                />
+              )}
             </label>
           );
         })}
       </div>
+
+      {mediaFields.length > 0 && (
+        <div className="mt-3 grid grid-cols-1 gap-2">
+          {mediaFields.map(({ key, label, kind }) => {
+            const currentValue = (draft[key] ?? tile[key] ?? "") as string;
+            return (
+              <MediaPicker
+                key={String(key)}
+                label={label}
+                value={currentValue}
+                kind={kind(tile)}
+                onChange={(v) => setDraft((d) => ({ ...d, [key]: v }))}
+              />
+            );
+          })}
+        </div>
+      )}
 
       <div className="mt-3 flex items-center gap-3">
         <button
