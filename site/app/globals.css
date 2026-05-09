@@ -16,6 +16,32 @@
   --canvas: #2D2DFF;
 }
 
+/* Shimmer — a slow bright sweep across white text on dark chrome.
+   Used on the hint pill ("scroll or drag to explore") to gently draw
+   the eye toward the interaction affordance without animating motion. */
+@keyframes shimmer-sweep {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
+.shimmer-text {
+  background: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0.55) 25%,
+    hsl(0,   95%, 72%) 38%,
+    hsl(45,  95%, 65%) 44%,
+    hsl(140, 75%, 60%) 50%,
+    hsl(200, 95%, 70%) 56%,
+    hsl(280, 80%, 72%) 62%,
+    rgba(255, 255, 255, 0.55) 75%
+  );
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer-sweep 5s linear infinite;
+}
+
 html, body {
   height: 100%;
   margin: 0;

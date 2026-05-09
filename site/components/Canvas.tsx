@@ -8,16 +8,14 @@ import {
   useState,
 } from "react";
 import {
-  ArrowLeft,
-  ArrowRight,
-  RotateCcw,
-  Share,
-  Plus,
   MoreHorizontal,
   X,
   Play,
   Pause,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
+import { useAudio } from "@/app/AudioProvider";
 import { tiles, type Tile } from "@/app/data/tiles";
 import introData from "@/app/data/intro.json";
 import { Waveform, StaticWaveform } from "@/components/ui/waveform";
@@ -77,8 +75,29 @@ export default function Canvas() {
   const movedDistanceRef = useRef(0);
   const rafRef = useRef<number | null>(null);
 
+  // ----- Multi-touch pinch state -----
+  // Tracks every currently-pressed pointer by its pointerId. When 2+ are present
+  // we treat the gesture as a pinch (not a pan). We DON'T use setPointerCapture
+  // here for the same reason as pan: it would steal pointerup/click and break
+  // tile activation.
+  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(
+    new Map()
+  );
+  // Snapshot taken when the 2nd pointer lands. The canvas-space "pivot" is the
+  // canvas point that was under the initial midpoint of the two pointers; we
+  // keep it constant for the rest of the gesture and re-derive offset+scale
+  // every move so that point stays under the current midpoint.
+  const pinchStateRef = useRef<{
+    initialDistance: number;
+    initialScale: number;
+    canvasPivot: { x: number; y: number };
+  } | null>(null);
+
   // Cursor state — separate from drag state to avoid re-rendering the whole canvas every frame
   const [grabbing, setGrabbing] = useState(false);
+  // Once the user has actually panned (via drag or wheel), the hint pill
+  // fades out — it's done its job.
+  const [hasInteracted, setHasInteracted] = useState(false);
 
   // --- Modal state ---
   const [openTile, setOpenTile] = useState<Tile | null>(null);
@@ -142,18 +161,57 @@ export default function Canvas() {
   }, [applyTransform]);
 
   // ---- Pointer handlers ----
+  // The pointer events API unifies mouse + touch + pen. We branch by the
+  // number of active pointers: 1 = pan/drag, 2+ = pinch-zoom.
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       // Modal open? Don't start a canvas drag — the modal handles its own input.
       if (modalOpenRef.current) return;
       // Only start a drag for primary-button or touch
       if (e.button !== 0 && e.pointerType === "mouse") return;
-      // Stop any running momentum
+
+      // Track this pointer.
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      // Stop any running momentum on any new pointer landing.
       if (rafRef.current) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
       velocityRef.current = { x: 0, y: 0 };
+
+      const count = activePointersRef.current.size;
+
+      if (count >= 2) {
+        // 2nd (or later) finger landed — switch to pinch mode.
+        // End any in-progress single-pointer pan.
+        draggingRef.current = false;
+        // Mark the current "tap" as moved so a tile click doesn't fire when
+        // fingers eventually lift.
+        movedDistanceRef.current = Infinity;
+        // Snapshot the pinch session from the first two pointers in the map.
+        // (Insertion order is preserved in JS Maps.)
+        const pts = Array.from(activePointersRef.current.values()).slice(0, 2);
+        const [p1, p2] = pts;
+        const midX = (p1.x + p2.x) / 2;
+        const midY = (p1.y + p2.y) / 2;
+        const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1;
+        const s = scaleRef.current;
+        pinchStateRef.current = {
+          initialDistance: dist,
+          initialScale: s,
+          // Canvas-space point under the initial midpoint — held constant
+          // through the gesture so it stays under the user's fingers.
+          canvasPivot: {
+            x: (midX - offsetRef.current.x) / s,
+            y: (midY - offsetRef.current.y) / s,
+          },
+        };
+        setGrabbing(false);
+        return;
+      }
+
+      // Single-pointer pan.
       draggingRef.current = true;
       movedDistanceRef.current = 0;
       dragStartRef.current = { x: e.clientX, y: e.clientY };
@@ -172,6 +230,34 @@ export default function Canvas() {
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
+      // Only track pointers we've already seen come down.
+      if (!activePointersRef.current.has(e.pointerId)) return;
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      // Pinch path — overrides single-pointer pan when 2+ fingers down.
+      if (pinchStateRef.current && activePointersRef.current.size >= 2) {
+        const pts = Array.from(activePointersRef.current.values()).slice(0, 2);
+        const [p1, p2] = pts;
+        const midX = (p1.x + p2.x) / 2;
+        const midY = (p1.y + p2.y) / 2;
+        const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1;
+
+        const { initialDistance, initialScale, canvasPivot } =
+          pinchStateRef.current;
+        const rawScale = initialScale * (dist / initialDistance);
+        const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, rawScale));
+
+        // Re-derive offset so canvasPivot stays under the current midpoint.
+        // Same identity used by zoomAt: screenPoint = offset + canvasPoint*scale.
+        offsetRef.current = {
+          x: midX - canvasPivot.x * newScale,
+          y: midY - canvasPivot.y * newScale,
+        };
+        scaleRef.current = newScale;
+        applyTransform();
+        return;
+      }
+
       if (!draggingRef.current) return;
       const dx = e.clientX - dragStartRef.current.x;
       const dy = e.clientY - dragStartRef.current.y;
@@ -200,16 +286,32 @@ export default function Canvas() {
 
   const onPointerUp = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
+      activePointersRef.current.delete(e.pointerId);
+      const remaining = activePointersRef.current.size;
+
+      // Pinch ending: as soon as we drop below 2 active pointers, end the
+      // gesture. We deliberately do NOT promote the remaining finger into a
+      // pan or kick off momentum — that feels jarring after a pinch.
+      if (pinchStateRef.current) {
+        if (remaining < 2) {
+          pinchStateRef.current = null;
+          draggingRef.current = false;
+          setGrabbing(false);
+        }
+        return;
+      }
+
       if (!draggingRef.current) return;
       draggingRef.current = false;
       setGrabbing(false);
-      // No releasePointerCapture: we never captured.
       // If movement was below threshold, treat the underlying click handler.
       // (The actual click handler reads movedDistanceRef.current.)
       // Otherwise kick off momentum.
       if (movedDistanceRef.current >= CLICK_THRESHOLD_PX) {
         if (rafRef.current) cancelAnimationFrame(rafRef.current);
         rafRef.current = requestAnimationFrame(animateMomentum);
+        // Real pan happened — dismiss the hint pill.
+        setHasInteracted(true);
       }
     },
     [animateMomentum]
@@ -270,6 +372,8 @@ export default function Canvas() {
         offsetRef.current.y -= e.deltaY;
         applyTransform();
       }
+      // Any wheel pan/zoom counts as interaction — dismiss hint pill.
+      setHasInteracted(true);
     };
     stage.addEventListener("wheel", onWheel, { passive: false });
     return () => stage.removeEventListener("wheel", onWheel);
@@ -389,7 +493,7 @@ export default function Canvas() {
       {/* Fixed UI chrome — pinned to viewport, never pans with the canvas */}
       <BrowserBar />
       <IntroCard onActivate={handleIntroActivate} />
-      <HintPill />
+      <HintPill hidden={hasInteracted} />
       <ColourPicker hue={hue} setHue={setHue} />
 
       {/* Modals */}
@@ -429,6 +533,27 @@ function DotGrid() {
   );
 }
 
+function MuteToggle() {
+  const { isPlaying, isMuted, toggle } = useAudio();
+  // Speaker icon: ON when audio is audibly playing, OFF otherwise
+  // (not started yet, or muted). Click does the right thing in any state —
+  // first click starts playback + fades up; subsequent clicks mute/unmute.
+  const audible = isPlaying && !isMuted;
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void toggle();
+      }}
+      className="w-7 h-7 rounded-full hover:bg-white/8 grid place-items-center transition-opacity"
+      aria-label={audible ? "mute" : "play sound"}
+      title={audible ? "Mute" : "Play sound"}
+    >
+      {audible ? <Volume2 size={13} /> : <VolumeX size={13} className="text-white/55" />}
+    </button>
+  );
+}
+
 function BrowserBar() {
   return (
     <div className="fixed top-3 left-1/2 -translate-x-1/2 z-50 pointer-events-none max-w-[calc(100vw-16px)]">
@@ -440,44 +565,10 @@ function BrowserBar() {
           <span className="w-2.5 h-2.5 rounded-full bg-white/15" />
         </div>
         <div className="hidden sm:block w-px h-5 bg-white/10" />
-        <button
-          type="button"
-          className="w-7 h-7 rounded-full hover:bg-white/8 grid place-items-center"
-          aria-label="back"
-        >
-          <ArrowLeft size={14} />
-        </button>
-        <button
-          type="button"
-          className="hidden sm:grid w-7 h-7 rounded-full hover:bg-white/8 place-items-center"
-          aria-label="forward"
-        >
-          <ArrowRight size={14} />
-        </button>
-        <button
-          type="button"
-          className="w-7 h-7 rounded-full hover:bg-white/8 grid place-items-center"
-          aria-label="refresh"
-        >
-          <RotateCcw size={13} />
-        </button>
         <div className="px-3 py-1 rounded-full bg-white/[0.06] text-white/80 tracking-tight min-w-[140px] sm:min-w-[200px] text-center truncate">
           <span className="text-white/40">https://</span>kamsbirthday.co
         </div>
-        <button
-          type="button"
-          className="hidden sm:grid w-7 h-7 rounded-full hover:bg-white/8 place-items-center"
-          aria-label="share"
-        >
-          <Share size={13} />
-        </button>
-        <button
-          type="button"
-          className="hidden sm:grid w-7 h-7 rounded-full hover:bg-white/8 place-items-center"
-          aria-label="add"
-        >
-          <Plus size={14} />
-        </button>
+        <MuteToggle />
         <button
           type="button"
           className="w-7 h-7 rounded-full hover:bg-white/8 grid place-items-center"
@@ -556,39 +647,121 @@ function IntroCard({ onActivate }: { onActivate: () => void }) {
   );
 }
 
-function HintPill() {
+function HintPill({ hidden = false }: { hidden?: boolean }) {
   // Pinned to the viewport, sitting just below the intro card.
+  // Fades out once the user has actually panned the canvas.
   return (
     <div
-      className="fixed left-1/2 top-1/2 -translate-x-1/2 pointer-events-none z-[40] mt-[150px] sm:mt-[120px]"
+      className={
+        "fixed left-1/2 top-1/2 -translate-x-1/2 pointer-events-none z-[40] mt-[150px] sm:mt-[120px] transition-opacity duration-700 " +
+        (hidden ? "opacity-0" : "opacity-100")
+      }
       style={{ width: 240, height: 38 }}
     >
-      <div className="chrome-surface flex items-center gap-2 px-4 py-2 rounded-full bg-[#0a0a14]/65 backdrop-blur-xl backdrop-saturate-150 text-white/80 font-mono text-[11px] tracking-[0.04em] justify-center">
-        <span className="drift">↔</span>
-        scroll or drag to explore
+      <div className="chrome-surface flex items-center gap-2 px-4 py-2 rounded-full bg-[#0a0a14]/65 backdrop-blur-xl backdrop-saturate-150 font-mono text-[11px] tracking-[0.04em] justify-center">
+        <span className="drift text-white/80">↔</span>
+        <span className="shimmer-text">scroll or drag to explore</span>
       </div>
     </div>
   );
 }
 
+// Strip a trailing unmatched asterisk so RichText doesn't render mid-italic
+// while typing (e.g., "Happy birthday, *Ka" -> "Happy birthday, Ka").
+function stripUnclosedAsterisk(text: string): string {
+  const count = (text.match(/\*/g) || []).length;
+  if (count % 2 === 0) return text;
+  const last = text.lastIndexOf("*");
+  return text.slice(0, last) + text.slice(last + 1);
+}
+
+const TYPED_KEY = "introTyped";
+const HEADER_CHARS_PER_SEC = 14; // typewriter pace for the heading
+const PARA_STAGGER_MS = 550; // delay between paragraph fade-ins
+const PARA_FADE_MS = 450; // duration of each paragraph fade
+
 function IntroFullMessage() {
+  const headerText = introData.modal.heading;
+  const paragraphs = introData.modal.paragraphs;
+
+  // Skip animation entirely if the user has already seen it this session.
+  const [headerTyped, setHeaderTyped] = useState<number>(() => {
+    if (typeof window === "undefined") return 0;
+    return sessionStorage.getItem(TYPED_KEY) === "1" ? headerText.length : 0;
+  });
+  const headerDone = headerTyped >= headerText.length;
+
+  // Type out the heading character-by-character.
+  useEffect(() => {
+    if (headerDone) return;
+    let raf = 0;
+    const startTime = performance.now();
+    const startTyped = headerTyped;
+    const tick = (t: number) => {
+      const elapsed = t - startTime;
+      const target = Math.min(
+        headerText.length,
+        startTyped + Math.floor((elapsed / 1000) * HEADER_CHARS_PER_SEC)
+      );
+      setHeaderTyped(target);
+      if (target < headerText.length) {
+        raf = requestAnimationFrame(tick);
+      } else {
+        try {
+          sessionStorage.setItem(TYPED_KEY, "1");
+        } catch {}
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // headerTyped intentionally omitted — re-running on every tick would
+    // restart the animation. The effect ends naturally when headerDone flips.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headerDone, headerText.length]);
+
+  // Click anywhere on the modal to skip to the final state.
+  const skip = () => {
+    if (!headerDone) {
+      setHeaderTyped(headerText.length);
+      try {
+        sessionStorage.setItem(TYPED_KEY, "1");
+      } catch {}
+    }
+  };
+
+  const headerVisible = stripUnclosedAsterisk(
+    headerText.slice(0, headerTyped)
+  );
+
   return (
-    <div className="relative max-w-[560px] w-full">
+    <div className="relative max-w-[560px] w-full" onClick={skip}>
     <div className="bg-[#0a0a14] text-white p-6 sm:p-10 rounded-[24px] sm:rounded-[28px] w-full chrome-surface no-scrollbar max-h-[85vh] overflow-y-auto overscroll-contain">
       <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-white/40 mb-5 sm:mb-6 text-center">
         {introData.modal.date}
       </div>
       <p className="font-serif text-[20px] sm:text-[24px] leading-[1.35] text-white/95 text-center">
-        <RichText text={introData.modal.heading} />
+        <RichText text={headerVisible} />
+        {!headerDone && (
+          <span
+            className="inline-block w-[2px] h-[1em] bg-white/70 align-[-0.15em] ml-[1px] animate-pulse"
+            aria-hidden="true"
+          />
+        )}
       </p>
-      <div className="font-serif text-[16px] sm:text-[18px] leading-[1.55] text-white/85 mt-5 sm:mt-6">
-        {introData.modal.paragraphs.map((para, i) => (
+      <div className="font-serif text-[16px] sm:text-[18px] leading-[1.4] text-white/85 mt-5 sm:mt-6">
+        {paragraphs.map((para, i) => (
           <p
             key={i}
             className={
-              "text-justify hyphens-auto whitespace-pre-line " +
-              (i > 0 ? "indent-8" : "")
+              "text-justify hyphens-auto whitespace-pre-line transition-opacity ease-out " +
+              (i > 0 ? "indent-8 " : "") +
+              (headerDone ? "opacity-100" : "opacity-0")
             }
+            style={{
+              transitionDuration: `${PARA_FADE_MS}ms`,
+              // Stagger: para 0 fades in at headerDone+0, para 1 at +stagger…
+              transitionDelay: headerDone ? `${i * PARA_STAGGER_MS}ms` : "0ms",
+            }}
           >
             <RichText text={para} />
           </p>
