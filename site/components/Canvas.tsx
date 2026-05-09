@@ -19,7 +19,30 @@ import {
   Pause,
 } from "lucide-react";
 import { tiles, type Tile } from "@/app/data/tiles";
+import introData from "@/app/data/intro.json";
 import { Waveform, StaticWaveform } from "@/components/ui/waveform";
+
+// Tiny inline parser: turn "Happy birthday, *Kam.*" into:
+//   "Happy birthday, " + <span className="italic">Kam.</span>
+// Allows the user to italicise arbitrary words in admin without needing
+// rigid prefix/italic/suffix fields. Alternates between plain and italic
+// on every "*" boundary.
+function RichText({ text }: { text: string }) {
+  const parts = text.split("*");
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <span key={i} className="italic">
+            {part}
+          </span>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </>
+  );
+}
 
 const CANVAS_W = 5000;
 const CANVAS_H = 5000;
@@ -28,6 +51,9 @@ const CENTER_Y = 2500;
 const CLICK_THRESHOLD_PX = 5; // movement under this = click, above = drag
 const FRICTION = 0.94;
 const MIN_VELOCITY = 0.05;
+const MIN_SCALE = 0.4;
+const MAX_SCALE = 3;
+const ZOOM_INTENSITY = 0.0025; // multiplier on wheel deltaY → log-scale zoom rate
 
 // Hue helpers for the colour picker
 function hueToHsl(h: number) {
@@ -42,6 +68,7 @@ export default function Canvas() {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const offsetRef = useRef({ x: 0, y: 0 });
+  const scaleRef = useRef(1);
   const velocityRef = useRef({ x: 0, y: 0 });
   const draggingRef = useRef(false);
   const dragStartRef = useRef({ x: 0, y: 0 });
@@ -57,25 +84,43 @@ export default function Canvas() {
   const [openTile, setOpenTile] = useState<Tile | null>(null);
   const [introOpen, setIntroOpen] = useState(false);
 
+  // Mirror modal state into a ref so the imperative pointer/wheel handlers
+  // (which run outside React's render cycle) can check it synchronously.
+  // When ANY modal is open, the canvas should ignore pan/zoom input so the
+  // modal's own scroll/click behaviour wins.
+  const modalOpenRef = useRef(false);
+  useEffect(() => {
+    modalOpenRef.current = !!openTile || introOpen;
+  }, [openTile, introOpen]);
+
   // --- Background hue ---
   const [hue, setHue] = useState(238); // matches #2D2DFF roughly
   const bgColor = hueToHsl(hue);
 
   // ----- Pan / transform application -----
+  // Order matters: translate THEN scale. With this order, `offsetRef` is in screen pixels
+  // (a 100px drag moves the canvas exactly 100px on screen, regardless of zoom level),
+  // and `scaleRef` zooms the canvas around its origin (top-left of the wrapper).
+  // The wheel-zoom handler compensates the offset so zoom feels anchored to the cursor.
   const applyTransform = useCallback(() => {
     const el = wrapperRef.current;
     if (!el) return;
-    el.style.transform = `translate3d(${offsetRef.current.x}px, ${offsetRef.current.y}px, 0)`;
+    const { x, y } = offsetRef.current;
+    const s = scaleRef.current;
+    el.style.transform = `translate3d(${x}px, ${y}px, 0) scale(${s})`;
   }, []);
 
-  // Centre the viewport on the canvas centre on mount
+  // Centre the viewport on the canvas centre on mount.
+  // Screen-pos of canvas point (px, py) = (offsetX + px*s, offsetY + py*s),
+  // so to centre (CENTER_X, CENTER_Y): offsetX = rect.width/2 - CENTER_X*s.
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
     const rect = stage.getBoundingClientRect();
+    const s = scaleRef.current;
     offsetRef.current = {
-      x: rect.width / 2 - CENTER_X,
-      y: rect.height / 2 - CENTER_Y,
+      x: rect.width / 2 - CENTER_X * s,
+      y: rect.height / 2 - CENTER_Y * s,
     };
     applyTransform();
   }, [applyTransform]);
@@ -99,6 +144,8 @@ export default function Canvas() {
   // ---- Pointer handlers ----
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
+      // Modal open? Don't start a canvas drag — the modal handles its own input.
+      if (modalOpenRef.current) return;
       // Only start a drag for primary-button or touch
       if (e.button !== 0 && e.pointerType === "mouse") return;
       // Stop any running momentum
@@ -168,26 +215,91 @@ export default function Canvas() {
     [animateMomentum]
   );
 
-  // Wheel / trackpad — pan the canvas
+  // Zoom around a viewport point so the canvas-space pixel under the cursor
+  // stays under the cursor after the scale change. Clamps to [MIN_SCALE, MAX_SCALE].
+  // Used by both wheel-pinch and the keyboard +/- shortcuts (which pivot on viewport centre).
+  const zoomAt = useCallback(
+    (cx: number, cy: number, factor: number) => {
+      const prev = scaleRef.current;
+      const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev * factor));
+      if (next === prev) return;
+      // Canvas-space point currently under (cx, cy):
+      //   px = (cx - offsetX) / prev
+      // After zoom we want the same px under (cx, cy):
+      //   offsetX' = cx - px * next
+      // Substituting and simplifying:
+      //   offsetX' = cx - (cx - offsetX) * (next / prev)
+      const ratio = next / prev;
+      const o = offsetRef.current;
+      offsetRef.current = {
+        x: cx - (cx - o.x) * ratio,
+        y: cy - (cy - o.y) * ratio,
+      };
+      scaleRef.current = next;
+      applyTransform();
+    },
+    [applyTransform]
+  );
+
+  // Wheel / trackpad — pan the canvas, OR zoom when ctrl/meta is held.
+  // Mac trackpad pinch-to-zoom arrives here as a wheel event with ctrlKey=true,
+  // so this single handler covers: trackpad pan, trackpad pinch, mouse wheel,
+  // Cmd+wheel (Mac), and Ctrl+wheel (Windows/Linux).
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
     const onWheel = (e: WheelEvent) => {
-      // Prevent page scroll, intercept as canvas pan.
+      // Modal open? Let the browser scroll the modal naturally — don't
+      // preventDefault, don't pan the canvas behind it.
+      if (modalOpenRef.current) return;
       e.preventDefault();
-      // Stop momentum on wheel input
+      // Stop momentum on any wheel input — feels weird to have it fight gestures.
       if (rafRef.current) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
         velocityRef.current = { x: 0, y: 0 };
       }
-      offsetRef.current.x -= e.deltaX;
-      offsetRef.current.y -= e.deltaY;
-      applyTransform();
+      if (e.ctrlKey || e.metaKey) {
+        // Zoom path. deltaY positive = scroll down/pinch in (zoom out).
+        // exp() gives smooth, multiplicative zoom regardless of deltaY magnitude.
+        const factor = Math.exp(-e.deltaY * ZOOM_INTENSITY);
+        zoomAt(e.clientX, e.clientY, factor);
+      } else {
+        // Pan path (existing behaviour).
+        offsetRef.current.x -= e.deltaX;
+        offsetRef.current.y -= e.deltaY;
+        applyTransform();
+      }
     };
     stage.addEventListener("wheel", onWheel, { passive: false });
     return () => stage.removeEventListener("wheel", onWheel);
-  }, [applyTransform]);
+  }, [applyTransform, zoomAt]);
+
+  // Keyboard zoom: Cmd/Ctrl + (= / + / -) to zoom, Cmd/Ctrl + 0 to reset.
+  // Pivots on viewport centre since there's no cursor position with a key event.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const stage = stageRef.current;
+      if (!stage) return;
+      const rect = stage.getBoundingClientRect();
+      const cx = rect.width / 2;
+      const cy = rect.height / 2;
+      if (e.key === "=" || e.key === "+") {
+        e.preventDefault();
+        zoomAt(cx, cy, 1.2);
+      } else if (e.key === "-") {
+        e.preventDefault();
+        zoomAt(cx, cy, 1 / 1.2);
+      } else if (e.key === "0") {
+        e.preventDefault();
+        // Reset to 1.0 by computing the factor needed.
+        zoomAt(cx, cy, 1 / scaleRef.current);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoomAt]);
 
   // ESC closes any modal
   useEffect(() => {
@@ -257,13 +369,18 @@ export default function Canvas() {
       {/* Faint dot grid — anchors the user spatially without competing with tiles */}
       <DotGrid />
 
-      {/* The pannable wrapper — single transform, all tiles absolute inside */}
+      {/* The pannable wrapper — single transform, all tiles absolute inside.
+          transformOrigin: "0 0" is critical: it makes scale() pivot around the
+          wrapper's top-left corner so canvas-space coordinates behave linearly.
+          Without it, CSS defaults to 50% 50% and zoom would swing diagonally
+          around (CANVAS_W/2, CANVAS_H/2). */}
       <div
         ref={wrapperRef}
         className="absolute top-0 left-0 will-change-transform"
         style={{
           width: CANVAS_W,
           height: CANVAS_H,
+          transformOrigin: "0 0",
         }}
       >
         {renderedTiles}
@@ -425,16 +542,14 @@ function IntroCard({ onActivate }: { onActivate: () => void }) {
           className="flex items-center justify-between text-[10px] sm:text-[11px] uppercase tracking-[0.18em] text-white/40"
           style={{ fontFamily: '"Geist Pixel", ui-monospace, monospace' }}
         >
-          <span>for your eyes only</span>
-          <span>open ↗</span>
+          <span>{introData.card.topLeft}</span>
+          <span>{introData.card.topRight}</span>
         </div>
-        <p className="font-serif text-[20px] sm:text-[26px] leading-[1.2] tracking-[-0.02em] text-white/95">
-          Happy birthday, <span className="italic">Kam.</span>{" "}
-          <br className="hidden sm:inline" />
-          my calm, my love, my baby, my man.
+        <p className="font-serif text-[20px] sm:text-[26px] leading-[1.2] tracking-[-0.02em] text-white/95 whitespace-pre-line">
+          <RichText text={introData.card.body} />
         </p>
         <p className="mt-2 sm:mt-3 font-serif text-[20px] sm:text-[26px] leading-[1.2] tracking-[-0.02em] text-white/95">
-          always, lota gi
+          <RichText text={introData.card.signoff} />
         </p>
       </div>
     </div>
@@ -458,24 +573,49 @@ function HintPill() {
 
 function IntroFullMessage() {
   return (
-    <div className="bg-[#0a0a14] text-white p-6 sm:p-10 rounded-[24px] sm:rounded-[28px] max-w-[560px] w-full chrome-surface">
+    <div className="relative max-w-[560px] w-full">
+    <div className="bg-[#0a0a14] text-white p-6 sm:p-10 rounded-[24px] sm:rounded-[28px] w-full chrome-surface no-scrollbar max-h-[85vh] overflow-y-auto overscroll-contain">
       <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-white/40 mb-5 sm:mb-6 text-center">
-        08.05.2026
+        {introData.modal.date}
       </div>
       <p className="font-serif text-[20px] sm:text-[24px] leading-[1.35] text-white/95 text-center">
-        Chapter 27, <span className="italic">Kam</span>.
+        <RichText text={introData.modal.heading} />
       </p>
-      <div className="h-3 sm:h-4" />
-      <p className="font-serif text-[16px] sm:text-[18px] leading-[1.55] text-white/85 text-justify hyphens-auto">
-        We made you a little corner of the internet. It’s a desktop full of moments
-        — some big, some stupid, some you probably don’t remember at all. Drag it
-        around. Click on things. Change the wallpaper if you fancy.
-      </p>
-      <div className="h-3 sm:h-4" />
-      <p className="font-serif text-[16px] sm:text-[18px] leading-[1.55] text-white/85 text-justify hyphens-auto">
-        We’re not very good at saying these things out loud, so we put them here.
-        We love you. Have an unreasonable amount of cake. — everyone xx
-      </p>
+      <div className="font-serif text-[16px] sm:text-[18px] leading-[1.55] text-white/85 mt-5 sm:mt-6">
+        {introData.modal.paragraphs.map((para, i) => (
+          <p
+            key={i}
+            className={
+              "text-justify hyphens-auto whitespace-pre-line " +
+              (i > 0 ? "indent-8" : "")
+            }
+          >
+            <RichText text={para} />
+          </p>
+        ))}
+      </div>
+    </div>
+      {/* Top scrim — fades content into the modal's top edge so the
+          heading doesn't hard-cut against scrolled paragraphs. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 h-12 sm:h-16 rounded-t-[24px] sm:rounded-t-[28px]"
+        style={{
+          background:
+            "linear-gradient(to top, transparent 0%, #0a0a14 85%)",
+        }}
+      />
+      {/* Bottom scrim — fades content into the modal's edge so the user
+          knows there's more to scroll. Pure decoration: pointer-events-none
+          so it doesn't block scroll wheel or touch. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-16 sm:h-20 rounded-b-[24px] sm:rounded-b-[28px]"
+        style={{
+          background:
+            "linear-gradient(to bottom, transparent 0%, #0a0a14 85%)",
+        }}
+      />
     </div>
   );
 }

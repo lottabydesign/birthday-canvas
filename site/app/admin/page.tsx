@@ -125,10 +125,10 @@ export default function AdminPage() {
       <header className="sticky top-0 z-10 bg-white/85 backdrop-blur border-b border-zinc-200 px-6 py-4">
         <div className="max-w-4xl mx-auto flex items-center gap-4">
           <div>
-            <h1 className="text-lg font-semibold tracking-tight">Tile metadata</h1>
+            <h1 className="text-lg font-semibold tracking-tight">Birthday canvas admin</h1>
             <p className="text-xs text-zinc-500 mt-0.5">
-              Edits write to <code>app/data/tiles.json</code>. Refresh the
-              canvas tab to see changes.
+              Edit the intro letter and tile metadata. Refresh the canvas
+              tab to see changes.
             </p>
           </div>
           <input
@@ -142,6 +142,12 @@ export default function AdminPage() {
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-6 space-y-3">
+        <IntroEditor />
+        <div className="pt-4 pb-1 border-t border-zinc-200">
+          <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">
+            Tiles
+          </h2>
+        </div>
         {visible.length === 0 && (
           <p className="text-sm text-zinc-500">No tiles match.</p>
         )}
@@ -169,6 +175,243 @@ export default function AdminPage() {
           />
         ))}
       </main>
+    </div>
+  );
+}
+
+type IntroShape = {
+  card: { topLeft: string; topRight: string; body: string; signoff: string };
+  modal: { date: string; heading: string; paragraphs: string[] };
+};
+
+function IntroEditor() {
+  const [intro, setIntro] = useState<IntroShape | null>(null);
+  const [draft, setDraft] = useState<IntroShape | null>(null);
+  const [state, setState] = useState<SaveState>("idle");
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/admin/intro")
+      .then((r) => r.json())
+      .then((d: IntroShape) => {
+        setIntro(d);
+        setDraft(d);
+      })
+      .catch((e) => setErr(String(e)));
+  }, []);
+
+  if (err) {
+    return (
+      <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+        Couldn’t load intro: {err}
+      </div>
+    );
+  }
+
+  if (!intro || !draft) {
+    return (
+      <div className="rounded-xl border border-zinc-200 bg-white p-4 text-sm text-zinc-500">
+        Loading intro…
+      </div>
+    );
+  }
+
+  const dirty = JSON.stringify(intro) !== JSON.stringify(draft);
+
+  const save = async () => {
+    setState("saving");
+    setErr(null);
+    try {
+      const r = await fetch("/api/admin/intro", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(draft),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body?.error || `HTTP ${r.status}`);
+      }
+      const out = (await r.json()) as { intro: IntroShape };
+      setIntro(out.intro);
+      setDraft(out.intro);
+      setState("saved");
+      setTimeout(() => setState("idle"), 1500);
+    } catch (e) {
+      setState("error");
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const updateCard = (key: keyof IntroShape["card"], val: string) =>
+    setDraft({ ...draft, card: { ...draft.card, [key]: val } });
+
+  const updateModal = (key: "date" | "heading", val: string) =>
+    setDraft({ ...draft, modal: { ...draft.modal, [key]: val } });
+
+  const updateParagraph = (i: number, val: string) => {
+    const next = [...draft.modal.paragraphs];
+    next[i] = val;
+    setDraft({ ...draft, modal: { ...draft.modal, paragraphs: next } });
+  };
+
+  const addParagraph = () =>
+    setDraft({
+      ...draft,
+      modal: { ...draft.modal, paragraphs: [...draft.modal.paragraphs, ""] },
+    });
+
+  const removeParagraph = (i: number) =>
+    setDraft({
+      ...draft,
+      modal: {
+        ...draft.modal,
+        paragraphs: draft.modal.paragraphs.filter((_, idx) => idx !== i),
+      },
+    });
+
+  const fieldClass =
+    "mt-1 w-full px-3 py-2 rounded-md border border-zinc-200 bg-zinc-50 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:bg-white";
+  const taClass = fieldClass + " resize-y min-h-[64px]";
+  const labelClass =
+    "text-[11px] font-medium text-zinc-500 uppercase tracking-wider";
+
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white p-4 space-y-4">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold">Intro card &amp; full letter</h2>
+        <span className="text-[11px] text-zinc-400">
+          Use <code className="font-mono">*word*</code> to italicise.{" "}
+          <code className="font-mono">\n</code> in card body = line break.
+        </span>
+      </div>
+
+      {/* Card */}
+      <div className="rounded-lg bg-zinc-50 border border-zinc-200 p-3 space-y-3">
+        <div className="text-[11px] font-semibold text-zinc-700 uppercase tracking-wider">
+          Card (always visible)
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="block">
+            <span className={labelClass}>Top left (mono)</span>
+            <input
+              type="text"
+              value={draft.card.topLeft}
+              onChange={(e) => updateCard("topLeft", e.target.value)}
+              className={fieldClass}
+            />
+          </label>
+          <label className="block">
+            <span className={labelClass}>Top right (mono)</span>
+            <input
+              type="text"
+              value={draft.card.topRight}
+              onChange={(e) => updateCard("topRight", e.target.value)}
+              className={fieldClass}
+            />
+          </label>
+        </div>
+        <label className="block">
+          <span className={labelClass}>Body</span>
+          <textarea
+            value={draft.card.body}
+            onChange={(e) => updateCard("body", e.target.value)}
+            className={taClass}
+            rows={3}
+          />
+        </label>
+        <label className="block">
+          <span className={labelClass}>Sign-off</span>
+          <input
+            type="text"
+            value={draft.card.signoff}
+            onChange={(e) => updateCard("signoff", e.target.value)}
+            className={fieldClass}
+          />
+        </label>
+      </div>
+
+      {/* Modal */}
+      <div className="rounded-lg bg-zinc-50 border border-zinc-200 p-3 space-y-3">
+        <div className="text-[11px] font-semibold text-zinc-700 uppercase tracking-wider">
+          Full letter (opens on tap)
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="block">
+            <span className={labelClass}>Date (top label)</span>
+            <input
+              type="text"
+              value={draft.modal.date}
+              onChange={(e) => updateModal("date", e.target.value)}
+              className={fieldClass}
+            />
+          </label>
+          <label className="block">
+            <span className={labelClass}>Heading</span>
+            <input
+              type="text"
+              value={draft.modal.heading}
+              onChange={(e) => updateModal("heading", e.target.value)}
+              className={fieldClass}
+            />
+          </label>
+        </div>
+        <div className="space-y-2">
+          <span className={labelClass}>Paragraphs</span>
+          {draft.modal.paragraphs.map((p, i) => (
+            <div key={i} className="flex gap-2">
+              <textarea
+                value={p}
+                onChange={(e) => updateParagraph(i, e.target.value)}
+                className={taClass}
+                rows={3}
+              />
+              <button
+                type="button"
+                onClick={() => removeParagraph(i)}
+                className="self-start px-2 py-1 rounded-md border border-zinc-300 bg-white text-zinc-500 hover:text-red-600 hover:border-red-300 text-xs"
+                title="Remove paragraph"
+                disabled={draft.modal.paragraphs.length <= 1}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={addParagraph}
+            className="text-xs text-zinc-600 hover:text-zinc-900 underline"
+          >
+            + add paragraph
+          </button>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          disabled={!dirty || state === "saving"}
+          onClick={save}
+          className="px-3 py-1.5 rounded-md bg-zinc-900 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-zinc-800"
+        >
+          {state === "saving"
+            ? "Saving…"
+            : state === "saved"
+              ? "Saved ✓"
+              : "Save intro"}
+        </button>
+        {dirty && state !== "saving" && (
+          <button
+            type="button"
+            onClick={() => setDraft(intro)}
+            className="text-xs text-zinc-500 hover:text-zinc-700"
+          >
+            Discard
+          </button>
+        )}
+        {err && state === "error" && (
+          <span className="text-xs text-red-600 ml-auto">{err}</span>
+        )}
+      </div>
     </div>
   );
 }
