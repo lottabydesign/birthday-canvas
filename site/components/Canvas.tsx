@@ -662,6 +662,8 @@ function SongBody({ tile }: { tile: Tile }) {
           alt={tile.songTitle ?? "cover"}
           className="w-[44px] h-[44px] rounded-md shrink-0 object-cover"
           draggable={false}
+          loading="lazy"
+          decoding="async"
         />
       ) : (
         <div className="w-[44px] h-[44px] rounded-md shrink-0 bg-white/10" />
@@ -724,6 +726,58 @@ function SongBody({ tile }: { tile: Tile }) {
   );
 }
 
+function LazyVideoTile({ src }: { src: string }) {
+  // Defer video fetch + playback until the tile is in the viewport.
+  // Off-screen tiles use preload="none" and are paused, so 100+ off-screen
+  // videos don't all start fetching/decoding on mount.
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    // Root = null -> document viewport. The canvas wrapper uses CSS
+    // translate3d, so each tile's bounding box updates naturally as the
+    // user pans, and the viewport intersection fires correctly.
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setVisible(true);
+            // Bump preload before attempting playback
+            try {
+              el.preload = "metadata";
+            } catch {}
+            const p = el.play();
+            if (p && typeof p.catch === "function") {
+              p.catch(() => {
+                /* autoplay might be blocked; muted+playsInline should cover it */
+              });
+            }
+          } else {
+            el.pause();
+          }
+        }
+      },
+      { root: null, rootMargin: "200px", threshold: 0 }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  return (
+    <video
+      ref={videoRef}
+      src={src}
+      className="absolute inset-0 w-full h-full object-cover"
+      muted
+      loop
+      playsInline
+      preload={visible ? "metadata" : "none"}
+    />
+  );
+}
+
 function TileBody({ tile }: { tile: Tile }) {
   if (tile.type === "Photo" && tile.src) {
     return (
@@ -733,6 +787,8 @@ function TileBody({ tile }: { tile: Tile }) {
           alt={tile.filename}
           className="absolute inset-0 w-full h-full object-cover"
           draggable={false}
+          loading="lazy"
+          decoding="async"
         />
         {tile.ageBadge !== undefined && (
           <span
@@ -750,18 +806,7 @@ function TileBody({ tile }: { tile: Tile }) {
     );
   }
   if (tile.type === "Video" && tile.src) {
-    return (
-      <>
-        <video
-          src={tile.src}
-          className="absolute inset-0 w-full h-full object-cover"
-          muted
-          loop
-          autoPlay
-          playsInline
-        />
-      </>
-    );
+    return <LazyVideoTile src={tile.src} />;
   }
   if (tile.type === "Text") {
     if (tile.noteImageSrc) {
@@ -772,6 +817,8 @@ function TileBody({ tile }: { tile: Tile }) {
             alt={tile.filename}
             className="absolute inset-0 w-full h-full object-contain"
             draggable={false}
+            loading="lazy"
+            decoding="async"
           />
         </div>
       );
