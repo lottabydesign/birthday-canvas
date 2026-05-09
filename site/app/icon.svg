@@ -1,13 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#2D2DFF"/>
-  <rect x="6" y="6" width="52" height="52" rx="10" fill="#0a0a14"/>
-  <text
-    x="32"
-    y="47"
-    font-family="Georgia, 'Times New Roman', serif"
-    font-style="italic"
-    font-size="38"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="heart" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#e6e6e6" />
+    </linearGradient>
+  </defs>
+  <path
+    fill="url(#heart)"
+    stroke="#bdbdbd"
+    stroke-width="0.6"
+    stroke-linejoin="round"
+    d="M16 28C7 22 2 15.5 2 9.5 2 5.4 5.2 2.5 8.7 2.5 11.6 2.5 14.4 4.4 16 7 17.6 4.4 20.4 2.5 23.3 2.5 26.8 2.5 30 5.4 30 9.5 30 15.5 25 22 16 28Z"
+  />
+  <ellipse
+    cx="11" cy="9" rx="3" ry="1.8"
     fill="#ffffff"
-    text-anchor="middle"
-  >K.</text>
+    opacity="0.75"
+    transform="rotate(-30 11 9)"
+  />
 </svg>
